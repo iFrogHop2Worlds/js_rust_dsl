@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "js_runtime",
+    "js_macro",
+    "js_example",
+]

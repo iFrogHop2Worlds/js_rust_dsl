@@ -1,0 +1,13 @@
+[package]
+name = "js_macro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "extra-traits"] } # "full" for parsing expressions, statements etc.
+quote = "1.0"
+proc-macro2 = "1.0"
+js_runtime = { path = "../js_runtime" } # Link to our runtime library

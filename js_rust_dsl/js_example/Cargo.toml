@@ -1,0 +1,8 @@
+[package]
+name = "js_example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+js_macro = { path = "../js_macro" }
+js_runtime = { path = "../js_runtime" } # Also need direct access to JsValue for assertions/testing
