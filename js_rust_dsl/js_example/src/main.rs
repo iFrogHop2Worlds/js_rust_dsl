@@ -4,23 +4,31 @@ use js_runtime::JsValue;
 fn main() {
     println!("--- Running JS-like script ---");
     js_script! {
-        let x = 42069;
-        let y = "world";
-        console.log("Hello from JS-like script! " + x + " " + y);
-        if (true) {
-            console.log("It's true!");
+        function greet(name) {
+            console.log("Hello, " + name);
         }
-        if (false) {
-            console.log("This won't print.");
+
+        greet("World");
+
+        console.log("--- For loop ---");
+        for (let i = 0; i < 5; i = i + 1) {
+            console.log(i);
         }
-        let z = null;
-        console.log(z);
-        let u = undefined;
-        console.log(u);
-        let num_str = x + "123.45";
-        let bool_val = true;
-        console.log(num_str);
-        console.log(bool_val);
+
+        console.log("--- While loop ---");
+        let j = 0;
+        while (j < 3) {
+            greet(j);
+            j = j + 1;
+        }
+
+        console.log("--- Do-while loop ---");
+        let k = 0;
+        do {
+            console.log("k = " + k);
+            k = k + 1;
+        } while (k < 2);
+
     }
     println!("--- Script finished ---");
 
@@ -44,5 +52,6 @@ fn main() {
     println!("Truthiness of 0: {}", js_zero.to_bool());
     println!("Truthiness of empty string: {}", js_empty_str.to_bool()); 
     println!("Truthiness of 10: {}", JsValue::Number(10.0).to_bool()); 
-    println!("Truthiness of 'hello': {}", JsValue::String("hello".to_string()).to_bool()); 
+    println!("Truthiness of 'hello': {}", JsValue::String("hello".to_string()).to_bool());
+
 }
