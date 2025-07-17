@@ -6,9 +6,11 @@ use syn::parse_macro_input;
 
 mod parser {
     use proc_macro2::TokenStream as TokenStream2;
-    use quote::ToTokens;
+    use quote::{quote, ToTokens};
     use syn::parse::{Parse, ParseStream};
-    use syn::{braced, custom_keyword, parenthesized, Ident, Lit, Result, Token};
+    use syn::{
+        braced, bracketed, custom_keyword, parenthesized, Ident, Lit, Result, Token,
+    };
 
     custom_keyword!(function);
 
@@ -19,7 +21,6 @@ mod parser {
     #[derive(Clone)]
     pub enum JsStatement {
         LetDecl(Ident, JsExpression),
-        ConsoleLog(JsExpression),
         IfStatement(JsExpression, JsBlock),
         FunctionDecl(JsFunctionDecl),
         ForLoop(JsForLoop),
@@ -35,6 +36,12 @@ mod parser {
         BinaryOp(Box<JsExpression>, JsBinaryOp, Box<JsExpression>),
         Assignment(Ident, Box<JsExpression>),
         Call(Ident, Vec<JsExpression>),
+        Array(Vec<JsExpression>),
+        MethodCall {
+            object: Box<JsExpression>,
+            method: Ident,
+            args: Vec<JsExpression>,
+        },
     }
 
     #[derive(Clone)]
@@ -105,7 +112,6 @@ mod parser {
     impl Parse for JsStatement {
         fn parse(input: ParseStream) -> Result<Self> {
             let lookahead = input.lookahead1();
-
             if lookahead.peek(Token![let]) {
                 let _ = input.parse::<Token![let]>()?;
                 let var_name: Ident = input.parse()?;
@@ -127,21 +133,8 @@ mod parser {
                 Ok(JsStatement::DoWhileLoop(input.parse()?))
             } else if lookahead.peek(Token![for]) {
                 Ok(JsStatement::ForLoop(input.parse()?))
-            } else if lookahead.peek(Ident) {
-                let fork = input.fork();
-                let ident: Ident = fork.parse()?;
-                if ident == "console" {
-                    let _ = input.parse::<Ident>()?;
-                    let _ = input.parse::<Token![.]>()?;
-                    let _ = input.parse::<Ident>()?;
-                    let content;
-                    parenthesized!(content in input);
-                    let expr: JsExpression = content.parse()?;
-                    return Ok(JsStatement::ConsoleLog(expr));
-                }
-                Ok(JsStatement::Expression(input.parse()?))
             } else {
-                Err(lookahead.error())
+                Ok(JsStatement::Expression(input.parse()?))
             }
         }
     }
@@ -158,15 +151,28 @@ mod parser {
                 "undefined" => Ok(JsExpression::Literal(JsLiteral::Undefined)),
                 _ => Ok(JsExpression::Identifier(ident)),
             }
+        } else if lookahead.peek(syn::token::Bracket) {
+            let content;
+            bracketed!(content in input);
+            let mut elements = Vec::new();
+            while !content.is_empty() {
+                elements.push(content.parse()?);
+                if content.peek(Token![,]) {
+                    content.parse::<Token![,]>()?;
+                }
+            }
+            Ok(JsExpression::Array(elements))
         } else {
             Err(lookahead.error())
         }
     }
 
-    fn parse_call_expression(input: ParseStream) -> Result<JsExpression> {
+    fn parse_postfix_expression(input: ParseStream) -> Result<JsExpression> {
         let mut expr = parse_primary_expression(input)?;
-        if input.peek(syn::token::Paren) {
-            if let JsExpression::Identifier(ident) = expr.clone() {
+        loop {
+            if input.peek(Token![.]) {
+                input.parse::<Token![.]>()?;
+                let method: Ident = input.parse()?;
                 let args_content;
                 parenthesized!(args_content in input);
                 let mut args = Vec::new();
@@ -176,18 +182,39 @@ mod parser {
                         args_content.parse::<Token![,]>()?;
                     }
                 }
-                expr = JsExpression::Call(ident, args);
+                expr = JsExpression::MethodCall {
+                    object: Box::new(expr),
+                    method,
+                    args,
+                };
+            } else if input.peek(syn::token::Paren) {
+                if let JsExpression::Identifier(ident) = expr {
+                    let args_content;
+                    parenthesized!(args_content in input);
+                    let mut args = Vec::new();
+                    while !args_content.is_empty() {
+                        args.push(args_content.parse()?);
+                        if args_content.peek(Token![,]) {
+                            args_content.parse::<Token![,]>()?;
+                        }
+                    }
+                    expr = JsExpression::Call(ident, args);
+                } else {
+                    return Err(input.error("Function call must be on an identifier"));
+                }
+            } else {
+                break;
             }
         }
         Ok(expr)
     }
 
     fn parse_additive_expression(input: ParseStream) -> Result<JsExpression> {
-        let mut lhs = parse_call_expression(input)?;
+        let mut lhs = parse_postfix_expression(input)?;
         while input.peek(Token![+]) {
             input.parse::<Token![+]>()?;
             let op = JsBinaryOp::Add;
-            let rhs = parse_call_expression(input)?;
+            let rhs = parse_postfix_expression(input)?;
             lhs = JsExpression::BinaryOp(Box::new(lhs), op, Box::new(rhs));
         }
         Ok(lhs)
@@ -248,7 +275,6 @@ mod parser {
 
     impl TryFrom<Lit> for JsLiteral {
         type Error = syn::Error;
-
         fn try_from(lit: Lit) -> Result<Self> {
             match lit {
                 Lit::Int(int_lit) => Ok(JsLiteral::Number(int_lit.base10_parse::<f64>()?)),
@@ -371,11 +397,6 @@ mod parser {
                         let mut #var_name: js_runtime::JsValue = #value_expr;
                     });
                 }
-                JsStatement::ConsoleLog(expr) => {
-                    tokens.extend(quote::quote! {
-                        js_runtime::console_log(&#expr);
-                    });
-                }
                 JsStatement::IfStatement(condition_expr, block) => {
                     tokens.extend(quote::quote! {
                         if #condition_expr.to_bool() {
@@ -411,7 +432,9 @@ mod parser {
                         JsBinaryOp::LessThan => quote::quote! { .less_than },
                         JsBinaryOp::GreaterThan => quote::quote! { .greater_than },
                         JsBinaryOp::LessThanOrEqual => quote::quote! { .less_than_or_equal },
-                        JsBinaryOp::GreaterThanOrEqual => quote::quote! { .greater_than_or_equal },
+                        JsBinaryOp::GreaterThanOrEqual => {
+                            quote::quote! { .greater_than_or_equal }
+                        }
                     };
                     tokens.extend(quote::quote! {
                         (#lhs)#op_token(&#rhs)
@@ -427,6 +450,35 @@ mod parser {
                     tokens.extend(quote::quote! {
                         #func_name(#(#args),*)
                     });
+                }
+                JsExpression::Array(elements) => {
+                    tokens.extend(quote! {
+                        js_runtime::JsValue::Array(vec![#(#elements),*])
+                    });
+                }
+                JsExpression::MethodCall {
+                    object,
+                    method,
+                    args,
+                } => {
+                    if let JsExpression::Identifier(obj_ident) = &**object {
+                        if obj_ident == "console" && method == "log" {
+                            tokens.extend(quote! {{
+                                js_runtime::console_log(vec![#(#args),*]);
+                                js_runtime::JsValue::Undefined
+                            }});
+                            return;
+                        }
+
+                        tokens.extend(quote! {
+                            #obj_ident.#method(#(#args),*)
+                        });
+                    } else {
+                        tokens.extend(quote! {{
+                            let mut temp = #object;
+                            temp.#method(#(#args),*)
+                        }});
+                    }
                 }
             }
         }
@@ -529,7 +581,7 @@ mod parser {
 }
 
 #[proc_macro]
-pub fn js_script(input: TokenStream) -> TokenStream {
+pub fn js(input: TokenStream) -> TokenStream {
     let script = parse_macro_input!(input as parser::JsScript);
     let expanded = quote! {
         #script

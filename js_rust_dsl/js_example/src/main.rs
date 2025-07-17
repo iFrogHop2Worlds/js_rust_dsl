@@ -1,9 +1,9 @@
-use js_macro::js_script;
+use js_macro::js;
 use js_runtime::JsValue; 
 
 fn main() {
     println!("--- Running JS-like script ---");
-    js_script! {
+    js! {
         function greet(name) {
             console.log("Hello, " + name);
         }
@@ -28,6 +28,18 @@ fn main() {
             console.log("k = " + k);
             k = k + 1;
         } while (k < 2);
+
+        console.log("--- Array example ---");
+        let my_array = [1, "two", true];
+        console.log("Initial array:", my_array);
+
+        my_array.push(4);
+        console.log("After push(4):", my_array);
+
+        let popped_value = my_array.pop();
+        console.log("Popped value:", popped_value);
+        console.log("After pop():", my_array);
+
 
     }
     println!("--- Script finished ---");
