@@ -1,3 +1,4 @@
+use js_runtime::JsFunction;
 use js_macro::js;
 use js_runtime::JsValue; 
 
@@ -39,6 +40,18 @@ fn main() {
         let popped_value = my_array.pop();
         console.log("Popped value:", popped_value);
         console.log("After pop():", my_array);
+
+        console.log("--- Object example ---");
+        _const person = {
+            firstName: "John",
+            lastName: "Doe",
+             age: 30,
+            greet: function(x) {
+                console.log(x);
+            }
+        };
+        person.greet("Hello!");
+        console.log(person.firstName + " " + person.lastName + " is " + person.age + " years old.");
 
 
     }

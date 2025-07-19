@@ -2,6 +2,12 @@ use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, Debug)]
+pub struct JsFunction {
+    pub parameters: Vec<String>,
+    pub body: String, // kepping this for display purposes rn
+}
+
+#[derive(Clone, Debug)]
 pub enum JsValue {
     Number(f64),
     String(String),
@@ -10,6 +16,7 @@ pub enum JsValue {
     Undefined,
     Object(HashMap<String, JsValue>),
     Array(Vec<JsValue>),
+    Function(JsFunction),
 }
 
 impl JsValue {
@@ -28,6 +35,9 @@ impl JsValue {
                 .collect::<Vec<_>>()
                 .join(","),
             JsValue::Object(_) => "[object Object]".to_string(),
+            JsValue::Function(func) => {
+                format!("function({}) {{ {} }}", func.parameters.join(", "), func.body)
+            }
         }
     }
 
@@ -36,6 +46,7 @@ impl JsValue {
     pub fn to_console_string(&self) -> String {
         match self {
             JsValue::String(s) => s.clone(),
+            JsValue::Function(_) => self.to_primitive_string(),
             _ => self.to_string(),
         }
     }
@@ -89,7 +100,7 @@ impl JsValue {
             }
             (JsValue::Boolean(_), _) => self.to_number() == other.to_number(),
             (_, JsValue::Boolean(_)) => self.to_number() == other.to_number(),
-            _ => false, // Default for objects, arrays
+            _ => false, // Default for objects, arrays, functions
         };
         JsValue::Boolean(result)
     }
@@ -147,7 +158,7 @@ impl JsValue {
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
             JsValue::Null | JsValue::Undefined => false,
-            JsValue::Object(_) | JsValue::Array(_) => true,
+            JsValue::Object(_) | JsValue::Array(_) | JsValue::Function(_) => true,
         }
     }
 
@@ -201,6 +212,7 @@ impl fmt::Display for JsValue {
                 let elems: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
                 write!(f, "[{}]", elems.join(", "))
             }
+            JsValue::Function(func) => write!(f, "function({}) {{...}}", func.parameters.join(", ")),
         }
     }
 }
