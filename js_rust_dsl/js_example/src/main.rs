@@ -1,6 +1,4 @@
-use js_runtime::JsFunction;
 use js_macro::js;
-use js_runtime::JsValue; 
 
 fn main() {
     println!("--- Running JS-like script ---");
@@ -45,12 +43,16 @@ fn main() {
         _const person = {
             firstName: "John",
             lastName: "Doe",
-             age: 30,
+            age: 30,
             greet: function(x) {
                 console.log(x);
+            },
+            setAge: function(x) {
+                this.age = x;
             }
         };
         person.greet("Hello!");
+        person.setAge(21);
         console.log(person.firstName + " " + person.lastName + " is " + person.age + " years old.");
 
 
@@ -58,6 +60,8 @@ fn main() {
     println!("--- Script finished ---");
 
     // You can also directly interact with JsValue
+    use js_runtime::JsValue;
+
     let js_num: JsValue = 5.0.into();
     let js_str: JsValue = "Rust".into();
     let result = js_num.add(&js_str);

@@ -1,3 +1,4 @@
+
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
@@ -20,7 +21,7 @@ mod parser {
         statements: Vec<JsStatement>,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub enum JsStatement {
         LetDecl(Ident, JsExpression),
         IfStatement(JsExpression, JsBlock),
@@ -31,12 +32,14 @@ mod parser {
         Expression(JsExpression),
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub enum JsExpression {
         Literal(JsLiteral),
         Identifier(Ident),
+        This,
         BinaryOp(Box<JsExpression>, JsBinaryOp, Box<JsExpression>),
         Assignment(Ident, Box<JsExpression>),
+        MemberAssignment(Box<JsExpression>, Ident, Box<JsExpression>),
         Call(Ident, Vec<JsExpression>),
         Array(Vec<JsExpression>),
         Object(JsObject),
@@ -53,13 +56,30 @@ mod parser {
         properties: Punctuated<JsProperty, Token![,]>,
     }
 
+    impl std::fmt::Debug for JsObject {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("JsObject")
+                .field("properties", &self.properties.iter().collect::<Vec<_>>())
+                .finish()
+        }
+    }
+
     #[derive(Clone)]
     pub struct JsProperty {
         key: Ident,
         value: JsExpression,
     }
 
-    #[derive(Clone)]
+    impl std::fmt::Debug for JsProperty {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("JsProperty")
+                .field("key", &self.key)
+                .field("value", &self.value)
+                .finish()
+        }
+    }
+
+    #[derive(Clone, Debug)]
     pub enum JsBinaryOp {
         Add,
         Equal,
@@ -70,7 +90,7 @@ mod parser {
         GreaterThanOrEqual,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub enum JsLiteral {
         Number(f64),
         String(String),
@@ -80,32 +100,31 @@ mod parser {
         Function(JsFunctionDecl),
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct JsBlock {
         statements: Vec<JsStatement>,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct JsFunctionDecl {
-        // Anonymous functions won't have a name
         name: Option<Ident>,
         params: Vec<Ident>,
         body: JsBlock,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct JsWhileLoop {
         condition: JsExpression,
         body: JsBlock,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct JsDoWhileLoop {
         body: JsBlock,
         condition: JsExpression,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct JsForLoop {
         init: Option<Box<JsStatement>>,
         condition: Option<JsExpression>,
@@ -160,7 +179,6 @@ mod parser {
         }
     }
 
-
     fn parse_primary_expression(input: ParseStream) -> Result<JsExpression> {
         if input.peek(function) {
             let func: JsFunctionDecl = input.parse()?;
@@ -172,7 +190,12 @@ mod parser {
             let lit: Lit = input.parse()?;
             Ok(JsExpression::Literal(JsLiteral::try_from(lit)?))
         } else if lookahead.peek(Ident) {
-            Ok(JsExpression::Identifier(input.parse()?))
+            let ident: Ident = input.parse()?;
+            if ident == "this" {
+                Ok(JsExpression::This)
+            } else {
+                Ok(JsExpression::Identifier(ident))
+            }
         } else if lookahead.peek(token::Paren) {
             let content;
             parenthesized!(content in input);
@@ -190,9 +213,6 @@ mod parser {
             Ok(JsExpression::Array(elements))
         } else if lookahead.peek(token::Brace) {
             Ok(JsExpression::Object(input.parse()?))
-        } else if lookahead.peek(function) {
-            let func_decl: JsFunctionDecl = input.parse()?;
-            Ok(JsExpression::Literal(JsLiteral::Function(func_decl)))
         } else {
             Err(lookahead.error())
         }
@@ -276,7 +296,6 @@ mod parser {
                 input.parse::<Token![>]>()?;
                 JsBinaryOp::GreaterThan
             } else {
-                // This should not be reached due to the `peek` checks
                 return Err(syn::Error::new(input.span(), "Unsupported comparison operator"));
             };
             let right = parse_additive_expression(input)?;
@@ -290,13 +309,20 @@ mod parser {
         if input.peek(Token![=]) {
             input.parse::<Token![=]>()?;
             let right = parse_assignment_expression(input)?;
-            if let JsExpression::Identifier(id) = left {
-                return Ok(JsExpression::Assignment(id, Box::new(right)));
-            } else {
-                return Err(syn::Error::new_spanned(
-                    left.to_token_stream(),
-                    "Invalid assignment target",
-                ));
+
+            return match left {
+                JsExpression::Identifier(id) => {
+                    Ok(JsExpression::Assignment(id, Box::new(right)))
+                }
+                JsExpression::MemberAccess(obj, prop) => {
+                    Ok(JsExpression::MemberAssignment(obj, prop, Box::new(right)))
+                }
+                _ => {
+                    Err(syn::Error::new_spanned(
+                        left.to_token_stream(),
+                        "Invalid assignment target",
+                    ))
+                }
             }
         }
         Ok(left)
@@ -320,7 +346,6 @@ mod parser {
             }
         }
     }
-
 
     impl Parse for JsBlock {
         fn parse(input: ParseStream) -> Result<Self> {
@@ -388,15 +413,12 @@ mod parser {
             let content;
             parenthesized!(content in input);
 
-            // the initializer can be a let declaration or an expression.
             let init = if content.peek(Token![;]) {
                 None
             } else {
                 Some(Box::new(content.parse::<JsStatement>()?))
             };
             if !content.peek(Token![;]) {
-                // if there was an init expression (not a declaration), it needs a semicolon.
-                // JsStatement::parse already consumes it for declarations.
                 if let Some(ref s) = init {
                     if let JsStatement::Expression(_) = **s {
                         content.parse::<Token![;]>()?;
@@ -451,81 +473,46 @@ mod parser {
 
     impl ToTokens for JsScript {
         fn to_tokens(&self, tokens: &mut TokenStream2) {
-            let mut functions = Vec::new();
-            for stmt in &self.statements {
-                if let JsStatement::FunctionDecl(func) = stmt {
-                    functions.push(func.clone());
-                }
-            }
-
-            let function_executors = functions.iter().map(|func| {
-                let name = &func.name;
-                let params = &func.params;
-                let body = &func.body;
-
-                quote! {
-                fn #name(args: &[JsValue], scope: &std::cell::RefCell<std::collections::HashMap<String, JsValue>>) -> JsValue {
-                    // create a new scope for function execution
-                    let func_scope = std::cell::RefCell::new({
-                        let mut new_scope = scope.borrow().clone();
-                        let param_names = vec![#(stringify!(#params)),*];
-                        for (i, param_name) in param_names.iter().enumerate() {
-                            if let Some(arg) = args.get(i) {
-                                new_scope.insert(param_name.to_string(), arg.clone());
-                            }
-                        }
-                        new_scope
-                    });
-
-                    // execute the function body
-                    let scope = &func_scope;
-                    #body
-                    JsValue::Undefined
-                }
-            }
-            });
-
             let statements = &self.statements;
             tokens.extend(quote! {
-            #(#function_executors)*
-            #(#statements)*
-        });
+                #(#statements)*
+            });
         }
     }
-
 
     impl ToTokens for JsStatement {
         fn to_tokens(&self, tokens: &mut TokenStream2) {
             match self {
                 JsStatement::LetDecl(ident, expr) => {
                     tokens.extend(quote! {
-                    {
-                        let value = #expr;
-                        let mut scope_borrow = scope.borrow_mut();
-                        scope_borrow.insert(String::from(stringify!(#ident)), value);
-                    }
-                });
+                        {
+                            let value = #expr;
+                            let mut scope_borrow = scope.borrow_mut();
+                            scope_borrow.insert(String::from(stringify!(#ident)), value);
+                        }
+                    });
                 }
                 JsStatement::FunctionDecl(func) => {
-                    let name = &func.name;
-                    let params = &func.params;
-                    let body = &func.body;
-
-                    // store function definition in the scope
-                    tokens.extend(quote! {
-                    {
-                        let mut scope_borrow = scope.borrow_mut();
-                        scope_borrow.insert(String::from(stringify!(#name)), JsValue::Function(JsFunction {
-                            parameters: vec![#(String::from(stringify!(#params))),*],
-                            body: stringify!(#body).to_string(),
-                        }));
+                    if let Some(name) = &func.name {
+                        let params = &func.params;
+                        let body_str = format!("{{ /* function body */ }}");
+                        tokens.extend(quote! {
+                            {
+                                let mut scope_borrow = scope.borrow_mut();
+                                scope_borrow.insert(String::from(stringify!(#name)), JsValue::Function(JsFunction::new(
+                                    vec![#(String::from(stringify!(#params))),*],
+                                    Vec::new(),
+                                    #body_str.to_string()
+                                )));
+                            }
+                        });
                     }
-                });
                 }
+
                 JsStatement::IfStatement(cond, body) => {
                     tokens.extend(quote! {
-                    if (#cond).to_bool() #body
-                });
+                        if (#cond).to_bool() #body
+                    });
                 }
                 JsStatement::ForLoop(fl) => {
                     tokens.extend(quote! { #fl; });
@@ -550,11 +537,30 @@ mod parser {
                 JsExpression::Literal(lit) => {
                     tokens.extend(quote! { #lit });
                 }
+                JsExpression::This => {
+                    tokens.extend(quote! {
+                    {
+                        if let Some(this_ref) = this_context {
+                            this_ref.borrow().clone()
+                        } else {
+                            JsValue::Undefined
+                        }
+                    }
+                });
+                }
                 JsExpression::Identifier(ident) => {
                     tokens.extend(quote! {
                     {
                         let scope_borrow = scope.borrow();
-                        scope_borrow.get(stringify!(#ident)).unwrap().clone()
+                        scope_borrow.get(stringify!(#ident)).unwrap_or(&JsValue::Undefined).clone()
+                    }
+                });
+                }
+                JsExpression::MemberAssignment(_obj, _prop, value) => {
+                    tokens.extend(quote! {
+                    {
+                        let new_value = #value;
+                        new_value
                     }
                 });
                 }
@@ -588,7 +594,14 @@ mod parser {
                     tokens.extend(quote! {
                     {
                         let args_vec = vec![#(#args),*];
-                        #ident(&args_vec, &scope)
+                        let scope_borrow = scope.borrow();
+                        if let Some(JsValue::Function(func_ref)) = scope_borrow.get(stringify!(#ident)) {
+                            let func_clone = func_ref.clone();
+                            drop(scope_borrow);
+                            func_clone.execute(&args_vec, &scope, None)
+                        } else {
+                            JsValue::Undefined
+                        }
                     }
                 });
                 }
@@ -604,17 +617,12 @@ mod parser {
                     tokens.extend(quote! {
                     {
                         let obj_val = #obj;
-                        if let JsValue::Object(ref map) = obj_val {
-                            map.get(stringify!(#member)).unwrap_or(&JsValue::Undefined).clone()
-                        } else {
-                            JsValue::Undefined
-                        }
+                        obj_val.get_property(stringify!(#member))
                     }
                 });
                 }
                 JsExpression::MethodCall { object, method, args } => {
-                    // console.log
-                    if let JsExpression::Identifier(obj_ident) = &**object {
+                    if let JsExpression::Identifier(obj_ident) = object.as_ref() {
                         if obj_ident == "console" && method == "log" {
                             tokens.extend(quote! {
                             {
@@ -627,98 +635,116 @@ mod parser {
                         }
                     }
 
-                    let obj_ident = match &**object {
-                        JsExpression::Identifier(id) => id,
-                        _ => panic!("Only simple identifiers allowed on the left-hand side of a method call"),
-                    };
-
+                    //array methods
                     let method_str = method.to_string();
-                    if method_str == "push" {
-                        tokens.extend(quote! {
-                        {
-                            let method_args = vec![#(#args),*];
-                            let result = {
-                                let mut scope_borrow = scope.borrow_mut();
-                                let value = scope_borrow.get_mut(stringify!(#obj_ident)).expect("undefined identifier");
-                                if let Some(arg) = method_args.into_iter().next() {
-                                    value.push(arg)
-                                } else {
-                                    JsValue::Undefined
-                                }
-                            };
-                            result
-                        }
-                    });
-                    } else if method_str == "pop" {
-                        tokens.extend(quote! {
-                        {
-                            let result = {
-                                let mut scope_borrow = scope.borrow_mut();
-                                let value = scope_borrow.get_mut(stringify!(#obj_ident)).expect("undefined identifier");
-                                value.pop()
-                            };
-                            result
-                        }
-                    });
-                    } else {
-                        // function property call (like person.name())
-                        tokens.extend(quote! {
-                        {
-                            let obj = {
-                                let scope_borrow = scope.borrow();
-                                scope_borrow.get(stringify!(#obj_ident)).expect("undefined identifier").clone()
-                            };
-                            if let JsValue::Object(ref map) = obj {
-                                if let Some(JsValue::Function(_func)) = map.get(stringify!(#method)) {
+                    if method_str == "push" || method_str == "pop" {
+                        if let JsExpression::Identifier(obj_ident) = object.as_ref() {
+                            if method_str == "push" {
+                                tokens.extend(quote! {
+                                    {
                                     let method_args = vec![#(#args),*];
-                                    console_log(method_args);
-                                    JsValue::Undefined
-                                } else {
-                                    JsValue::Undefined
-                                }
+                                    let result = {
+                                        let mut scope_borrow = scope.borrow_mut();
+                                        if let Some(value) = scope_borrow.get_mut(stringify!(#obj_ident)) {
+                                            if let Some(arg) = method_args.into_iter().next() {
+                                                value.push(arg)
+                                            } else {
+                                                JsValue::Undefined
+                                            }
+                                        } else {
+                                            JsValue::Undefined
+                                        }
+                                    };
+                                        result
+                                    }
+                                });
                             } else {
-                                JsValue::Undefined
+                                tokens.extend(quote! {
+                                    {
+                                        let result = {
+                                            let mut scope_borrow = scope.borrow_mut();
+                                            if let Some(value) = scope_borrow.get_mut(stringify!(#obj_ident)) {
+                                                value.pop()
+                                            } else {
+                                                JsValue::Undefined
+                                            }
+                                        };
+                                        result
+                                    }
+                                });
                             }
+
+                            return;
                         }
-                    });
+                    }
+
+                    // works for all methods
+                    if let JsExpression::Identifier(obj_ident) = object.as_ref() {
+                        tokens.extend(quote! {
+                            {
+                                let method_args = vec![#(#args),*];
+                                let method_name = stringify!(#method);
+
+                                let (method_result, updated_obj) = {
+                                    let scope_borrow = scope.borrow();
+                                    let object_val = scope_borrow.get(stringify!(#obj_ident)).unwrap_or(&JsValue::Undefined).clone();
+                                    drop(scope_borrow);
+                                    object_val.execute_method(method_name, method_args, &scope)
+                                };
+
+
+                                {
+                                    let mut scope_borrow = scope.borrow_mut();
+                                    scope_borrow.insert(stringify!(#obj_ident).to_string(), updated_obj);
+                                }
+
+                                method_result
+                            }
+                        });
+                    } else {
+                        // on expressions (not identifiers)
+                        tokens.extend(quote! {
+                            {
+                                let method_args = vec![#(#args),*];
+                                let object_val = #object;
+                                let (method_result, _updated_obj) = object_val.execute_method(stringify!(#method), method_args, &scope);
+                                method_result
+                            }
+                        });
                     }
                 }
             }
         }
     }
 
-
-    impl ToTokens for JsFunctionDecl {
-        fn to_tokens(&self, tokens: &mut TokenStream2) {
-            let params_as_strings = self
-                .params
-                .iter()
-                .map(|ident| quote! { String::from(stringify!(#ident)) });
-
-            // we store the raw source of the body.
-            let body_src = stringify!(#self);
-
-            tokens.extend(quote! {
-            JsFunction {
-                parameters: vec![ #(#params_as_strings),* ],
-                body: #body_src.to_string(),
-            }
-        });
-        }
-    }
-
     impl ToTokens for JsLiteral {
         fn to_tokens(&self, tokens: &mut TokenStream2) {
             match self {
-                JsLiteral::Number(n)      => tokens.extend(quote! { JsValue::Number(#n) }),
-                JsLiteral::String(s)      => tokens.extend(quote! { JsValue::String(#s.to_string()) }),
-                JsLiteral::Boolean(b)     => tokens.extend(quote! { JsValue::Boolean(#b) }),
-                JsLiteral::Null           => tokens.extend(quote! { JsValue::Null }),
-                JsLiteral::Undefined      => tokens.extend(quote! { JsValue::Undefined }),
-                JsLiteral::Function(func) => tokens.extend(quote! { JsValue::Function(#func) }),
+                JsLiteral::Number(n) => tokens.extend(quote! { JsValue::Number(#n) }),
+                JsLiteral::String(s) => tokens.extend(quote! { JsValue::String(#s.to_string()) }),
+                JsLiteral::Boolean(b) => tokens.extend(quote! { JsValue::Boolean(#b) }),
+                JsLiteral::Null => tokens.extend(quote! { JsValue::Null }),
+                JsLiteral::Undefined => tokens.extend(quote! { JsValue::Undefined }),
+                JsLiteral::Function(func) => {
+                    let params = &func.params;
+                    let body_statements = &func.body.statements;
+
+                    let runtime_statements = body_statements.iter().map(|stmt| {
+                        convert_statement_to_runtime(stmt)
+                    });
+
+                    tokens.extend(quote! {
+                    JsValue::Function(JsFunction::new(
+                        vec![#(String::from(stringify!(#params))),*],
+                        vec![#(#runtime_statements),*],
+                        format!("function({}) {{ ... }}", vec![#(stringify!(#params)),*].join(", "))
+                    ))
+                });
+                }
             }
         }
     }
+
 
     impl ToTokens for JsBlock {
         fn to_tokens(&self, tokens: &mut TokenStream2) {
@@ -783,6 +809,22 @@ mod parser {
         }
     }
 
+    impl ToTokens for JsFunctionDecl {
+        fn to_tokens(&self, tokens: &mut TokenStream2) {
+            let params = &self.params;
+            let body = &self.body;
+            if let Some(name) = &self.name {
+                tokens.extend(quote! {
+                function #name(#(#params),*) #body
+            });
+            } else {
+                tokens.extend(quote! {
+                function(#(#params),*) #body
+            });
+            }
+        }
+    }
+
     impl ToTokens for JsObject {
         fn to_tokens(&self, tokens: &mut TokenStream2) {
             let properties = self.properties.iter().map(|prop| {
@@ -793,7 +835,7 @@ mod parser {
                 }
             });
 
-            tokens.append_all(quote! {
+            tokens.extend(quote! {
                 {
                     let mut map = std::collections::HashMap::new();
                     #(#properties)*
@@ -804,17 +846,148 @@ mod parser {
     }
 }
 
+fn convert_statement_to_runtime(stmt: &parser::JsStatement) -> proc_macro2::TokenStream {
+    match stmt {
+        parser::JsStatement::Expression(expr) => {
+            let runtime_expr = convert_expression_to_runtime(expr);
+            quote! { js_runtime::JsStatement::Expression(#runtime_expr) }
+        }
+        parser::JsStatement::LetDecl(ident, expr) => {
+            let ident_str = ident.to_string();
+            let runtime_expr = convert_expression_to_runtime(expr);
+            quote! { js_runtime::JsStatement::Assignment(#ident_str.to_string(), #runtime_expr) }
+        }
+        parser::JsStatement::FunctionDecl(_) => {
+            // function declarations at statement level arent handled in object methods
+            quote! { js_runtime::JsStatement::Expression(js_runtime::JsExpression::Literal(js_runtime::JsValue::Undefined)) }
+        }
+        parser::JsStatement::IfStatement(cond, _body) => {
+            let runtime_cond = convert_expression_to_runtime(cond);
+            // converts to an expression for now
+            quote! { js_runtime::JsStatement::Expression(#runtime_cond) }
+        }
+        _ => quote! { js_runtime::JsStatement::Expression(js_runtime::JsExpression::Literal(js_runtime::JsValue::Undefined)) }
+    }
+}
+
+fn convert_expression_to_runtime(expr: &parser::JsExpression) -> proc_macro2::TokenStream {
+    match expr {
+        parser::JsExpression::Literal(lit) => {
+            match lit {
+                parser::JsLiteral::String(s) => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::String(#s.to_string())) },
+                parser::JsLiteral::Number(n) => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Number(#n)) },
+                parser::JsLiteral::Boolean(b) => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Boolean(#b)) },
+                parser::JsLiteral::Null => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Null) },
+                parser::JsLiteral::Undefined => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Undefined) },
+                _ => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Undefined) }
+            }
+        }
+        parser::JsExpression::Identifier(ident) => {
+            let ident_str = ident.to_string();
+            quote! { js_runtime::JsExpression::Identifier(#ident_str.to_string()) }
+        }
+        parser::JsExpression::This => {
+            quote! { js_runtime::JsExpression::This }
+        }
+        parser::JsExpression::BinaryOp(left, op, right) => {
+            let left_runtime = convert_expression_to_runtime(left);
+            let right_runtime = convert_expression_to_runtime(right);
+            let op_str = match op {
+                parser::JsBinaryOp::Add => "+",
+                parser::JsBinaryOp::Equal => "==",
+                parser::JsBinaryOp::NotEqual => "!=",
+                parser::JsBinaryOp::LessThan => "<",
+                parser::JsBinaryOp::GreaterThan => ">",
+                parser::JsBinaryOp::LessThanOrEqual => "<=",
+                parser::JsBinaryOp::GreaterThanOrEqual => ">=",
+            };
+            quote! {
+                js_runtime::JsExpression::BinaryOp(
+                    Box::new(#left_runtime),
+                    #op_str.to_string(),
+                    Box::new(#right_runtime)
+                )
+            }
+        }
+        parser::JsExpression::Assignment(ident, expr) => {
+            let ident_str = ident.to_string();
+            let runtime_expr = convert_expression_to_runtime(expr);
+            quote! {
+                js_runtime::JsExpression::Call(
+                    "__assign__".to_string(),
+                    vec![
+                        js_runtime::JsExpression::Literal(js_runtime::JsValue::String(#ident_str.to_string())),
+                        #runtime_expr
+                    ]
+                )
+            }
+        }
+        parser::JsExpression::MemberAssignment(obj, prop, value) => {
+            let obj_runtime = convert_expression_to_runtime(obj);
+            let prop_str = prop.to_string();
+            let value_runtime = convert_expression_to_runtime(value);
+
+            // convert this.prop = value to a special method call
+            quote! {
+                js_runtime::JsExpression::MethodCall {
+                    object: Box::new(#obj_runtime),
+                    method: "__set_property__".to_string(),
+                    args: vec![
+                        js_runtime::JsExpression::Literal(js_runtime::JsValue::String(#prop_str.to_string())),
+                        #value_runtime
+                    ]
+                }
+            }
+        }
+        parser::JsExpression::Call(ident, args) => {
+            let ident_str = ident.to_string();
+            let runtime_args: Vec<_> = args.iter().map(convert_expression_to_runtime).collect();
+            quote! {
+                js_runtime::JsExpression::Call(
+                    #ident_str.to_string(),
+                    vec![#(#runtime_args),*]
+                )
+            }
+        }
+        parser::JsExpression::MethodCall { object, method, args } => {
+            let obj_runtime = convert_expression_to_runtime(object);
+            let method_str = method.to_string();
+            let runtime_args: Vec<_> = args.iter().map(convert_expression_to_runtime).collect();
+            quote! {
+                js_runtime::JsExpression::MethodCall {
+                    object: Box::new(#obj_runtime),
+                    method: #method_str.to_string(),
+                    args: vec![#(#runtime_args),*]
+                }
+            }
+        }
+        parser::JsExpression::MemberAccess(obj, member) => {
+            let obj_runtime = convert_expression_to_runtime(obj);
+            let member_str = member.to_string();
+            quote! {
+                js_runtime::JsExpression::MemberAccess(
+                    Box::new(#obj_runtime),
+                    #member_str.to_string()
+                )
+            }
+        }
+        _ => quote! { js_runtime::JsExpression::Literal(js_runtime::JsValue::Undefined) }
+    }
+}
+
+
 #[proc_macro]
 pub fn js(input: TokenStream) -> TokenStream {
     let script = parse_macro_input!(input as parser::JsScript);
 
     let expanded = quote! {
         {
-            use js_runtime::{JsValue, console_log};
+            use js_runtime::{JsValue, JsFunction, console_log};
             use std::collections::HashMap;
             use std::cell::RefCell;
 
             let scope = RefCell::new(HashMap::<String, JsValue>::new());
+            let this_context: Option<&RefCell<JsValue>> = None;
 
             #script
         }
